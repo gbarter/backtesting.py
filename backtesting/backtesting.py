@@ -1742,6 +1742,227 @@ class Backtest:
             open_browser=open_browser)
 
 
+class Screen(Backtest):
+    """
+    Backtest a particular (parameterized) strategy
+    on particular data.
+
+    Initialize a backtest. Requires data and a strategy to test.
+    After initialization, you can call method
+    `backtesting.backtesting.Backtest.run` to run a backtest
+    instance, or `backtesting.backtesting.Backtest.optimize` to
+    optimize it.
+
+    `data` is a `pd.DataFrame` with columns:
+    `Open`, `High`, `Low`, `Close`, and (optionally) `Volume`.
+    If any columns are missing, set them to what you have available,
+    e.g.
+
+        df['Open'] = df['High'] = df['Low'] = df['Close']
+
+    The passed data frame can contain additional columns that
+    can be used by the strategy (e.g. sentiment info).
+    DataFrame index can be either a datetime index (timestamps)
+    or a monotonic range index (i.e. a sequence of periods).
+
+    `strategy` is a `backtesting.backtesting.Strategy`
+    _subclass_ (not an instance).
+
+    `cash` is the initial cash to start with.
+
+    `spread` is the the constant bid-ask spread rate (relative to the price).
+    E.g. set it to `0.0002` for commission-less forex
+    trading where the average spread is roughly 0.2‰ of the asking price.
+
+    `commission` is the commission rate. E.g. if your broker's commission
+    is 1% of order value, set commission to `0.01`.
+    The commission is applied twice: at trade entry and at trade exit.
+    Besides one single floating value, `commission` can also be a tuple of floating
+    values `(fixed, relative)`. E.g. set it to `(100, .01)`
+    if your broker charges minimum $100 + 1%.
+    Additionally, `commission` can be a callable
+    `func(order_size: int, price: float) -> float`
+    (note, order size is negative for short orders),
+    which can be used to model more complex commission structures.
+    Negative commission values are interpreted as market-maker's rebates.
+
+    .. note::
+        Before v0.4.0, the commission was only applied once, like `spread` is now.
+        If you want to keep the old behavior, simply set `spread` instead.
+
+    .. note::
+        With nonzero `commission`, long and short orders will be placed
+        at an adjusted price that is slightly higher or lower (respectively)
+        than the current price. See e.g.
+        [#153](https://github.com/kernc/backtesting.py/issues/153),
+        [#538](https://github.com/kernc/backtesting.py/issues/538),
+        [#633](https://github.com/kernc/backtesting.py/issues/633).
+
+    `margin` is the required margin (ratio) of a leveraged account.
+    No difference is made between initial and maintenance margins.
+    To run the backtest using e.g. 50:1 leverge that your broker allows,
+    set margin to `0.02` (1 / leverage).
+
+    If `trade_on_close` is `True`, market orders will be filled
+    with respect to the current bar's closing price instead of the
+    next bar's open.
+
+    If `hedging` is `True`, allow trades in both directions simultaneously.
+    If `False`, the opposite-facing orders first close existing trades in
+    a [FIFO] manner.
+
+    If `exclusive_orders` is `True`, each new order auto-closes the previous
+    trade/position, making at most a single trade (long or short) in effect
+    at each time.
+
+    If `finalize_trades` is `True`, the trades that are still
+    [active and ongoing] at the end of the backtest will be closed on
+    the last bar and will contribute to the computed backtest statistics.
+
+    .. tip:: Fractional trading
+        See also `backtesting.lib.FractionalBacktest` if you want to trade
+        fractional units (of e.g. bitcoin).
+
+    [FIFO]: https://www.investopedia.com/terms/n/nfa-compliance-rule-2-43b.asp
+    [active and ongoing]: https://kernc.github.io/backtesting.py/doc/backtesting/backtesting.html#backtesting.backtesting.Strategy.trades
+    """  # noqa: E501
+    def __init__(self,
+                 data: pd.DataFrame,
+                 strategy: Type[Strategy],
+                 *,
+                 cash: float = 10_000,
+                 spread: float = .0,
+                 commission: Union[float, Tuple[float, float]] = .0,
+                 margin: float = 1.,
+                 trade_on_close=False,
+                 hedging=False,
+                 exclusive_orders=False,
+                 finalize_trades=False,
+                 ):
+        super().__init__(data, strategy, cash=cash, spread=spread, commission=commission, margin=margin, trade_on_close=trade_on_close, hedging=hedging, exclusive_orders=exclusive_orders, finalize_trades=False)
+
+    def run(self, **kwargs) -> _Broker:
+        """
+        Run the backtest. Returns `pd.Series` with results and statistics.
+
+        Keyword arguments are interpreted as strategy parameters.
+
+            >>> Backtest(GOOG, SmaCross).run()
+            Start                     2004-08-19 00:00:00
+            End                       2013-03-01 00:00:00
+            Duration                   3116 days 00:00:00
+            Exposure Time [%]                    96.74115
+            Equity Final [$]                     51422.99
+            Equity Peak [$]                      75787.44
+            Return [%]                           414.2299
+            Buy & Hold Return [%]               703.45824
+            Return (Ann.) [%]                    21.18026
+            Volatility (Ann.) [%]                36.49391
+            CAGR [%]                             14.15984
+            Sharpe Ratio                          0.58038
+            Sortino Ratio                         1.08479
+            Calmar Ratio                          0.44144
+            Alpha [%]                           394.37391
+            Beta                                  0.03803
+            Max. Drawdown [%]                   -47.98013
+            Avg. Drawdown [%]                    -5.92585
+            Max. Drawdown Duration      584 days 00:00:00
+            Avg. Drawdown Duration       41 days 00:00:00
+            # Trades                                   66
+            Win Rate [%]                          46.9697
+            Best Trade [%]                       53.59595
+            Worst Trade [%]                     -18.39887
+            Avg. Trade [%]                        2.53172
+            Max. Trade Duration         183 days 00:00:00
+            Avg. Trade Duration          46 days 00:00:00
+            Profit Factor                         2.16795
+            Expectancy [%]                        3.27481
+            SQN                                   1.07662
+            Kelly Criterion                       0.15187
+            _strategy                            SmaCross
+            _equity_curve                           Eq...
+            _trades                       Size  EntryB...
+            dtype: object
+
+        .. warning::
+            You may obtain different results for different strategy parameters.
+            E.g. if you use 50- and 200-bar SMA, the trading simulation will
+            begin on bar 201. The actual length of delay is equal to the lookback
+            period of the `Strategy.I` indicator which lags the most.
+            Obviously, this can affect results.
+        """
+        data = _Data(self._data.copy(deep=False))
+        broker: _Broker = self._broker(data=data)
+        strategy: Strategy = self._strategy(broker, data, kwargs)
+
+        strategy.init()
+        data._update()  # Strategy.init might have changed/added to data.df
+
+        # Indicators used in Strategy.next()
+        indicator_attrs = _strategy_indicators(strategy)
+
+        # Skip first few candles where indicators are still "warming up"
+        # +1 to have at least two entries available
+        start = 1 + _indicator_warmup_nbars(strategy)
+
+        # Disable "invalid value encountered in ..." warnings. Comparison
+        # np.nan >= 3 is not invalid; it's False.
+        with np.errstate(invalid='ignore'):
+
+            for i in _tqdm(range(start, len(self._data)), desc=self.run.__qualname__,
+                           unit='bar', mininterval=2, miniters=100):
+                # Prepare data and indicators for `next` call
+                data._set_length(i + 1)
+                for attr, indicator in indicator_attrs:
+                    # Slice indicator on the last dimension (case of 2d indicator)
+                    setattr(strategy, attr, indicator[..., :i + 1])
+
+                # Handle orders processing and broker stuff
+                try:
+                    broker.next()
+                except _OutOfMoneyError:
+                    break
+
+                # Next tick, a moment before bar close
+                strategy.next()
+            else:
+                if self._finalize_trades is True:
+                    # Close any remaining open trades so they produce some stats
+                    for trade in reversed(broker.trades):
+                        trade.close()
+
+                    # HACK: Re-run broker one last time to handle close orders placed in the last
+                    #  strategy iteration. Use the same OHLC values as in the last broker iteration.
+                    if start < len(self._data):
+                        try_(broker.next, exception=_OutOfMoneyError)
+
+            # Set data back to full length
+            # for future `indicator._opts['data'].index` calls to work
+            data._set_length(len(self._data))
+
+            equity = pd.Series(broker._equity).bfill().fillna(broker._cash).values
+            self._results = compute_stats(
+                trades=broker.closed_trades,
+                equity=equity,
+                ohlc_data=self._data,
+                risk_free_rate=0.0,
+                strategy_instance=strategy,
+            )
+
+        return broker
+    
+    @staticmethod
+    def _mp_task(arg):
+        bt, data_shm, params_batch = arg
+        bt._data, shm = SharedMemoryManager.shm2df(data_shm)
+        try:
+            return [stats.filter(regex='^[^_]') if stats['# Trades'] else None
+                    for stats in (bt.run(**params)
+                                  for params in params_batch)]
+        finally:
+            for shmem in shm:
+                shmem.close()
+
 # NOTE: Don't put anything public below this __all__ list
 
 __all__ = [getattr(v, '__name__', k)
